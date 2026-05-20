@@ -9,6 +9,7 @@ import time
 from google.genai import types
 from dotenv import load_dotenv
 from openwakeword.model import Model
+from collections import deque
 
 
 load_dotenv()
@@ -38,6 +39,7 @@ bot_instruction ="""
 
 SILENCE_TIMEOUT = 15        # seconds of silence before stopping
 SILENCE_THRESHOLD = 500     # audio amplitude below this = silence
+PRE_BUFFER_SECONDS = 2      # seconds of audio to keep before wake word for context
 
 # audio configs
 FORMAT=pyaudio.paInt16
@@ -63,19 +65,22 @@ output_stream=p.open(
     frames_per_buffer=CHUNK
 )
 
-wake_model = Model(wakeword_models=["alexa"], inference_framework="onnx")
+wake_model = Model(wakeword_models=["hey_jarvis"], inference_framework="onnx")
 def listen_for_wake_word():
-    print("Listening for wake word 'Alexa'")
-    
+    print("Listening for wake word 'hey jarvis'")
+    chunks_per_second = RATE // CHUNK
+    pre_buffer = deque(maxlen=PRE_BUFFER_SECONDS * chunks_per_second)
+
     while True:
         audio_data = input_stream.read(CHUNK, exception_on_overflow=False)
         audio_np = np.frombuffer(audio_data, dtype=np.int16)
+        pre_buffer.append(audio_data)
         predictions = wake_model.predict(audio_np)
 
         for word,score in predictions.items():
-            if word=="alexa" and score>0.5:
+            if word=="hey_jarvis" and score>0.5:
                 print("Wake word detected!")
-                return
+                return list(pre_buffer)  # return pre-buffered audio for context
             
 # function to check if audio is silent
 def is_silent(audio_data)->bytes:
@@ -84,19 +89,27 @@ def is_silent(audio_data)->bytes:
 # -------
 
 # send audio
-async def audio_input(session,stop_event: asyncio.Event):
+async def audio_input(session,stop_event: asyncio.Event,pre_buffer:list):
     last_audio_time = time.time()
     try:
+        for chunk in pre_buffer:
+            await session.send_realtime_input(
+                  audio=types.Blob(
+                      data=chunk,
+                      mime_type="audio/pcm;rate=16000"
+                  )
+                )
+            
         while stop_event.is_set()==False:
             data = await asyncio.to_thread(input_stream.read,CHUNK,exception_on_overflow=False)
             if data:
                 if is_silent(data):
                     if time.time()-last_audio_time > SILENCE_TIMEOUT:
-                        print("Silence timeout reached, stopping audio input.")
+                        print("Silence timeout. Ending session...")
                         stop_event.set()
                         break
-                    else:
-                        last_audio_time = time.time()  # reset timer on silence
+                else:
+                    last_audio_time = time.time()  # reset timer on silence
                 await session.send_realtime_input(
                   audio=types.Blob(
                       data=data,
@@ -140,7 +153,7 @@ async def audio_output(session,stop_event: asyncio.Event):
         print(f"Error in audio_output: {e}")
         
 # run session
-async def run_session():
+async def run_session(pre_buffer:list):
     client = genai.Client(api_key="AIzaSyC8OGRDKyZhB1x83xaf_twokRJxyDgNk34")
     model_id = "gemini-3.1-flash-live-preview"
 
@@ -167,15 +180,15 @@ async def run_session():
         print("connected")
         stop_event = asyncio.Event()
 
-        input_task=asyncio.create_task(audio_input(session,stop_event))
+        input_task=asyncio.create_task(audio_input(session,stop_event,pre_buffer))
         output_task=asyncio.create_task(audio_output(session,stop_event))
 
         await asyncio.gather(input_task,output_task)
 
 async def main():
     while True:
-        await asyncio.to_thread(listen_for_wake_word)
-        await run_session()
+        pre_buffer=await asyncio.to_thread(listen_for_wake_word)
+        await run_session(pre_buffer)
 
         print("Session ended. Restarting wake word detection...")
     
