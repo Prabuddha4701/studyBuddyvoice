@@ -13,6 +13,9 @@ from collections import deque
 import openwakeword
 import openwakeword.utils
 
+import io
+import wave
+
 is_speaking = asyncio.Event()
 load_dotenv()
 api_key = os.getenv("GEMINI_API_KEY")
@@ -35,6 +38,24 @@ bot_instruction ="""
     - You are Bunny. You are a physical hardware device sitting on the user's desk. 
     - If the user references seeing you or interacting with your hardware (like looking at your camera or face detection), acknowledge it naturally.
     - Keep your answers highly accurate, especially for educational topics, math, or coding. Being cute does not mean being less smart!
+
+        ### 4. Device Control
+    You can control a fan, a table light, and a humidifier connected to the user's desk.
+    
+    When the user asks to control a device, do TWO things:
+    1. Respond naturally in your cute voice persona as usual.
+    2. At the very end of your response, on a new line, emit a command tag like this:
+    
+    [CMD:device=fan,action=on]
+    [CMD:device=fan,action=off]
+    [CMD:device=light,action=on]
+    [CMD:device=light,action=off]
+    [CMD:device=humidifier,action=on]
+    [CMD:device=humidifier,action=off]
+    
+    Only emit a command tag when the user clearly wants to control a device.
+    Never speak the command tag out loud — it is silent metadata only.
+    If no device control is needed, do not emit any command tag.
     
     - Note to model: The user might speak or ask questions in a mix of English and Sinhala (Singlish). Respond naturally in the same language style they use, while strictly keeping the cute persona.
     """
@@ -106,6 +127,62 @@ def play_beep(frequency=880, duration=0.2, volume=0.5):
     wave = (np.sin(2 * np.pi * frequency * t) * volume * 32767).astype(np.int16)
     output_stream.write(wave.tobytes())
 #--------- 
+# handle device command
+def handle_device_command(device: str, action: str):
+    print(f"Device command: {device} -> {action}")
+    if device == "fan":
+       print("fan on")
+    elif device == "light":
+        print("light on")
+    elif device == "humidifier":
+        print("humidifier on")
+# --------
+#handle commands text
+def transcribe_and_detect(audio_chunks: list):
+    # Convert raw PCM to WAV in memory
+    wav_buffer = io.BytesIO()
+    with wave.open(wav_buffer, 'wb') as wf:
+        wf.setnchannels(CHANNELS)
+        wf.setsampwidth(2)
+        wf.setframerate(RATE)
+        wf.writeframes(b"".join(audio_chunks))
+    wav_buffer.seek(0)
+
+    try:
+        # Send audio directly to Gemini — no STT needed!
+        print("Sending audio to Gemini...")
+        client = genai.Client(api_key="AIzaSyCyJENZXiUw17QesqYg-tljZgPUYNQ6At0")
+        response = client.models.generate_content(
+            model="gemini-3.1-flash-live-preview",
+            contents=[
+                types.Part(
+                    inline_data=types.Blob(
+                        data=wav_buffer.read(),
+                        mime_type="audio/wav"
+                    )
+                ),
+                types.Part(text="""
+                    Listen to this audio. If the person is asking to control a device, 
+                    respond ONLY with one of these exact strings:
+                    fan_on / fan_off / light_on / light_off / humidifier_on / humidifier_off
+                    If no device command, respond with: none
+                    Only respond with the command string, nothing else.
+                """)
+            ]
+        )
+        
+        result = response.text.strip().lower()
+        print(f"Gemini command result: {result}")
+
+        if result != "none" and "_" in result:
+            device, action = result.split("_", 1)
+            handle_device_command(device, action)
+
+    except Exception as e:
+        print(f"Gemini STT error: {e}")
+# ----------
+
+
 
 # send audio
 async def audio_input(session, stop_event: asyncio.Event, pre_buffer: list):
@@ -172,7 +249,7 @@ async def audio_output(session,stop_event: asyncio.Event):
 # run session
 async def run_session(pre_buffer:list):
     is_speaking.clear()
-    client = genai.Client(api_key="AIzaSyC8OGRDKyZhB1x83xaf_twokRJxyDgNk34")
+    client = genai.Client(api_key="AIzaSyCyJENZXiUw17QesqYg-tljZgPUYNQ6At0")
     model_id = "gemini-3.1-flash-live-preview"
 
 
